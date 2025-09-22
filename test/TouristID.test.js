@@ -1,534 +1,349 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { time, loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
+const { time } = require("@nomicfoundation/hardhat-network-helpers");
 
 describe("TouristID Contract", function () {
-  // Fixture to deploy the contract
-  async function deployTouristIDFixture() {
-    const [owner, issuer1, issuer2, unauthorized] = await ethers.getSigners();
+  let touristID;
+  let admin;
+  let user1;
+  let user2;
+  
+  // Test data
+  const kycHash = ethers.keccak256(ethers.toUtf8Bytes("test-kyc-data"));
+  const itineraryHash = ethers.keccak256(ethers.toUtf8Bytes("test-itinerary"));
+  const emergencyHash = ethers.keccak256(ethers.toUtf8Bytes("test-emergency"));
+  
+  beforeEach(async function () {
+    [admin, user1, user2] = await ethers.getSigners();
     
     const TouristID = await ethers.getContractFactory("TouristID");
-    const touristID = await TouristID.deploy();
-    
+    touristID = await TouristID.deploy();
     await touristID.waitForDeployment();
-    
-    return { touristID, owner, issuer1, issuer2, unauthorized };
-  }
-
-  // Helper function to create test data
-  function createTestTouristData(touristId = 12345) {
-    const kycData = `AADHAAR_${touristId}_PASSPORT_DATA`;
-    const validFrom = Math.floor(Date.now() / 1000) + 3600; // 1 hour from now
-    const validTo = validFrom + (30 * 24 * 60 * 60); // 30 days validity
-    const kycHash = ethers.keccak256(ethers.toUtf8Bytes(`${kycData}${validFrom}${validTo}`));
-    
-    return {
-      touristId,
-      kycHash,
-      validFrom,
-      validTo,
-      emergencyContact: "+91-9876543210",
-      tripItinerary: "Mumbai -> Goa -> Bangalore -> Mumbai"
-    };
-  }
+  });
 
   describe("Deployment", function () {
-    it("Should set the right owner", async function () {
-      const { touristID, owner } = await loadFixture(deployTouristIDFixture);
-      expect(await touristID.owner()).to.equal(owner.address);
-    });
-
-    it("Should authorize the deployer as an issuer", async function () {
-      const { touristID, owner } = await loadFixture(deployTouristIDFixture);
-      expect(await touristID.authorizedIssuers(owner.address)).to.be.true;
+    it("Should set the correct admin", async function () {
+      expect(await touristID.admin()).to.equal(admin.address);
     });
   });
 
-  describe("Issuer Management", function () {
-    it("Should allow owner to authorize new issuers", async function () {
-      const { touristID, owner, issuer1 } = await loadFixture(deployTouristIDFixture);
-      
-      await expect(touristID.connect(owner).authorizeIssuer(issuer1.address))
-        .to.emit(touristID, "IssuerAuthorized")
-        .withArgs(issuer1.address);
-      
-      expect(await touristID.authorizedIssuers(issuer1.address)).to.be.true;
-    });
-
-    it("Should allow owner to revoke issuer authorization", async function () {
-      const { touristID, owner, issuer1 } = await loadFixture(deployTouristIDFixture);
-      
-      await touristID.connect(owner).authorizeIssuer(issuer1.address);
-      
-      await expect(touristID.connect(owner).revokeIssuer(issuer1.address))
-        .to.emit(touristID, "IssuerRevoked")
-        .withArgs(issuer1.address);
-      
-      expect(await touristID.authorizedIssuers(issuer1.address)).to.be.false;
-    });
-
-    it("Should not allow non-owners to authorize issuers", async function () {
-      const { touristID, issuer1, unauthorized } = await loadFixture(deployTouristIDFixture);
-      
-      await expect(
-        touristID.connect(unauthorized).authorizeIssuer(issuer1.address)
-      ).to.be.revertedWith("Ownable: caller is not the owner");
-    });
-  });
-
-  describe("Tourist ID Issuance", function () {
+  describe("Issue Tourist ID", function () {
     it("Should issue a new tourist ID successfully", async function () {
-      const { touristID, owner } = await loadFixture(deployTouristIDFixture);
-      const testData = createTestTouristData();
+      const currentTime = await time.latest();
+      const startDate = currentTime + 3600; // 1 hour from now
+      const endDate = startDate + 86400; // 1 day later
       
-      await expect(
-        touristID.connect(owner).issueTouristID(
-          testData.touristId,
-          testData.kycHash,
-          owner.address,
-          testData.validFrom,
-          testData.validTo,
-          testData.emergencyContact,
-          testData.tripItinerary
-        )
-      ).to.emit(touristID, "TouristIDIssued")
-        .withArgs(testData.touristId, owner.address, testData.validFrom, testData.validTo);
-      
-      expect(await touristID.touristExists(testData.touristId)).to.be.true;
-    });
-
-    it("Should not allow duplicate tourist IDs", async function () {
-      const { touristID, owner } = await loadFixture(deployTouristIDFixture);
-      const testData = createTestTouristData();
-      
-      // Issue first ID
-      await touristID.connect(owner).issueTouristID(
-        testData.touristId,
-        testData.kycHash,
-        owner.address,
-        testData.validFrom,
-        testData.validTo,
-        testData.emergencyContact,
-        testData.tripItinerary
+      const tx = await touristID.issueTouristId(
+        kycHash,
+        itineraryHash,
+        emergencyHash,
+        startDate,
+        endDate
       );
       
-      // Try to issue duplicate
-      await expect(
-        touristID.connect(owner).issueTouristID(
-          testData.touristId,
-          testData.kycHash,
-          owner.address,
-          testData.validFrom,
-          testData.validTo,
-          testData.emergencyContact,
-          testData.tripItinerary
-        )
-      ).to.be.revertedWith("Tourist ID already exists");
+      const receipt = await tx.wait();
+      const event = receipt.logs.find(log => log.fragment?.name === 'TouristIdIssued');
+      
+      expect(event).to.not.be.undefined;
+      expect(event.args.issuer).to.equal(admin.address);
     });
 
-    it("Should not allow unauthorized issuers to issue IDs", async function () {
-      const { touristID, unauthorized } = await loadFixture(deployTouristIDFixture);
-      const testData = createTestTouristData();
+    it("Should generate unique tourist IDs", async function () {
+      const currentTime = await time.latest();
+      const startDate = currentTime + 3600;
+      const endDate = startDate + 86400;
       
-      await expect(
-        touristID.connect(unauthorized).issueTouristID(
-          testData.touristId,
-          testData.kycHash,
-          unauthorized.address,
-          testData.validFrom,
-          testData.validTo,
-          testData.emergencyContact,
-          testData.tripItinerary
-        )
-      ).to.be.revertedWith("Not authorized issuer");
+      const tx1 = await touristID.issueTouristId(
+        kycHash,
+        itineraryHash,
+        emergencyHash,
+        startDate,
+        endDate
+      );
+      
+      // Wait a bit to ensure different timestamp
+      await time.increase(1);
+      
+      const tx2 = await touristID.issueTouristId(
+        ethers.keccak256(ethers.toUtf8Bytes("different-kyc")),
+        itineraryHash,
+        emergencyHash,
+        startDate + 1,
+        endDate + 1
+      );
+      
+      const receipt1 = await tx1.wait();
+      const receipt2 = await tx2.wait();
+      
+      const event1 = receipt1.logs.find(log => log.fragment?.name === 'TouristIdIssued');
+      const event2 = receipt2.logs.find(log => log.fragment?.name === 'TouristIdIssued');
+      
+      expect(event1.args.touristId).to.not.equal(event2.args.touristId);
     });
 
-    it("Should validate time ranges", async function () {
-      const { touristID, owner } = await loadFixture(deployTouristIDFixture);
-      const testData = createTestTouristData();
+    it("Should only allow admin to issue tourist IDs", async function () {
+      const currentTime = await time.latest();
+      const startDate = currentTime + 3600;
+      const endDate = startDate + 86400;
       
-      // Test invalid time range (validTo before validFrom)
       await expect(
-        touristID.connect(owner).issueTouristID(
-          testData.touristId,
-          testData.kycHash,
-          owner.address,
-          testData.validTo, // Wrong order
-          testData.validFrom,
-          testData.emergencyContact,
-          testData.tripItinerary
+        touristID.connect(user1).issueTouristId(
+          kycHash,
+          itineraryHash,
+          emergencyHash,
+          startDate,
+          endDate
         )
-      ).to.be.revertedWith("Invalid time range");
+      ).to.be.revertedWith("Only admin can perform this action");
     });
 
-    it("Should require non-empty KYC hash", async function () {
-      const { touristID, owner } = await loadFixture(deployTouristIDFixture);
-      const testData = createTestTouristData();
+    it("Should validate date ranges", async function () {
+      const currentTime = await time.latest();
+      const startDate = currentTime + 3600;
+      const endDate = startDate - 1000; // Invalid: end before start
       
       await expect(
-        touristID.connect(owner).issueTouristID(
-          testData.touristId,
-          ethers.ZeroHash, // Empty hash
-          owner.address,
-          testData.validFrom,
-          testData.validTo,
-          testData.emergencyContact,
-          testData.tripItinerary
+        touristID.issueTouristId(
+          kycHash,
+          itineraryHash,
+          emergencyHash,
+          startDate,
+          endDate
         )
-      ).to.be.revertedWith("KYC hash cannot be empty");
+      ).to.be.revertedWith("Invalid date range");
     });
 
-    it("Should require emergency contact", async function () {
-      const { touristID, owner } = await loadFixture(deployTouristIDFixture);
-      const testData = createTestTouristData();
+    it("Should generate QR code", async function () {
+      const currentTime = await time.latest();
+      const startDate = currentTime + 3600;
+      const endDate = startDate + 86400;
       
-      await expect(
-        touristID.connect(owner).issueTouristID(
-          testData.touristId,
-          testData.kycHash,
-          owner.address,
-          testData.validFrom,
-          testData.validTo,
-          "", // Empty emergency contact
-          testData.tripItinerary
-        )
-      ).to.be.revertedWith("Emergency contact required");
+      const tx = await touristID.issueTouristId(
+        kycHash,
+        itineraryHash,
+        emergencyHash,
+        startDate,
+        endDate
+      );
+      
+      const receipt = await tx.wait();
+      const event = receipt.logs.find(log => log.fragment?.name === 'TouristIdIssued');
+      const touristId = event.args.touristId;
+      
+      const qrCode = await touristID.getTouristQRCode(touristId);
+      expect(qrCode).to.include('{"id":"0x');
+      expect(qrCode).to.include('"type":"tourist"}');
     });
   });
 
-  describe("Tourist ID Verification", function () {
-    it("Should return correct tourist data", async function () {
-      const { touristID, owner } = await loadFixture(deployTouristIDFixture);
-      const testData = createTestTouristData();
+  describe("Verify Tourist ID", function () {
+    let touristId;
+    
+    beforeEach(async function () {
+      const currentTime = await time.latest();
+      const startDate = currentTime + 3600;
+      const endDate = startDate + 86400;
       
-      // Issue tourist ID
-      await touristID.connect(owner).issueTouristID(
-        testData.touristId,
-        testData.kycHash,
-        owner.address,
-        testData.validFrom,
-        testData.validTo,
-        testData.emergencyContact,
-        testData.tripItinerary
+      const tx = await touristID.issueTouristId(
+        kycHash,
+        itineraryHash,
+        emergencyHash,
+        startDate,
+        endDate
       );
       
-      // Verify data
-      const result = await touristID.verifyTouristID(testData.touristId);
-      
-      expect(result[0]).to.equal(testData.kycHash); // kycHash
-      expect(result[1]).to.equal(owner.address); // issuerId
-      expect(result[2]).to.equal(testData.validFrom); // validFrom
-      expect(result[3]).to.equal(testData.validTo); // validTo
-      expect(result[4]).to.equal(testData.emergencyContact); // emergencyContact
-      expect(result[5]).to.equal(testData.tripItinerary); // tripItinerary
-      expect(result[6]).to.equal(0); // status (ACTIVE = 0)
+      const receipt = await tx.wait();
+      const event = receipt.logs.find(log => log.fragment?.name === 'TouristIdIssued');
+      touristId = event.args.touristId;
     });
 
-    it("Should revert for non-existent tourist ID", async function () {
-      const { touristID } = await loadFixture(deployTouristIDFixture);
+    it("Should return false for non-existent tourist ID", async function () {
+      const fakeTouristId = ethers.keccak256(ethers.toUtf8Bytes("fake-id"));
+      const isValid = await touristID.verifyTouristId(fakeTouristId);
+      expect(isValid).to.be.false;
+    });
+
+    it("Should return true for valid tourist ID within time range", async function () {
+      // Move to within the valid time range
+      await time.increase(3700); // Move past start time
+      
+      const isValid = await touristID.verifyTouristId(touristId);
+      expect(isValid).to.be.true;
+    });
+
+    it("Should return false for tourist ID outside time range", async function () {
+      // Don't move time, so we're before start time
+      const isValid = await touristID.verifyTouristId(touristId);
+      expect(isValid).to.be.false;
+    });
+
+    it("Should return false for revoked tourist ID", async function () {
+      await touristID.revokeTouristId(touristId);
+      
+      // Move to within valid time range
+      await time.increase(3700);
+      
+      const isValid = await touristID.verifyTouristId(touristId);
+      expect(isValid).to.be.false;
+    });
+  });
+
+  describe("Revoke Tourist ID", function () {
+    let touristId;
+    
+    beforeEach(async function () {
+      const currentTime = await time.latest();
+      const startDate = currentTime + 3600;
+      const endDate = startDate + 86400;
+      
+      const tx = await touristID.issueTouristId(
+        kycHash,
+        itineraryHash,
+        emergencyHash,
+        startDate,
+        endDate
+      );
+      
+      const receipt = await tx.wait();
+      const event = receipt.logs.find(log => log.fragment?.name === 'TouristIdIssued');
+      touristId = event.args.touristId;
+    });
+
+    it("Should revoke tourist ID successfully", async function () {
+      await expect(touristID.revokeTouristId(touristId))
+        .to.emit(touristID, "TouristIdRevoked")
+        .withArgs(touristId, admin.address);
+      
+      const tourist = await touristID.getTouristInfo(touristId);
+      expect(tourist.active).to.be.false;
+    });
+
+    it("Should only allow admin to revoke", async function () {
+      await expect(
+        touristID.connect(user1).revokeTouristId(touristId)
+      ).to.be.revertedWith("Only admin can perform this action");
+    });
+
+    it("Should not revoke already revoked tourist ID", async function () {
+      await touristID.revokeTouristId(touristId);
       
       await expect(
-        touristID.verifyTouristID(99999)
+        touristID.revokeTouristId(touristId)
+      ).to.be.revertedWith("Tourist ID is already revoked");
+    });
+
+    it("Should not revoke non-existent tourist ID", async function () {
+      const fakeTouristId = ethers.keccak256(ethers.toUtf8Bytes("fake-id"));
+      
+      await expect(
+        touristID.revokeTouristId(fakeTouristId)
       ).to.be.revertedWith("Tourist ID does not exist");
     });
   });
 
-  describe("Tourist ID Status Management", function () {
-    it("Should revoke a tourist ID", async function () {
-      const { touristID, owner } = await loadFixture(deployTouristIDFixture);
-      const testData = createTestTouristData();
+  describe("Verify Tourist Hashes", function () {
+    let touristId;
+    
+    beforeEach(async function () {
+      const currentTime = await time.latest();
+      const startDate = currentTime + 3600;
+      const endDate = startDate + 86400;
       
-      // Issue tourist ID
-      await touristID.connect(owner).issueTouristID(
-        testData.touristId,
-        testData.kycHash,
-        owner.address,
-        testData.validFrom,
-        testData.validTo,
-        testData.emergencyContact,
-        testData.tripItinerary
+      const tx = await touristID.issueTouristId(
+        kycHash,
+        itineraryHash,
+        emergencyHash,
+        startDate,
+        endDate
       );
       
-      // Revoke it
-      await expect(
-        touristID.connect(owner).revokeTouristID(testData.touristId)
-      ).to.emit(touristID, "TouristIDRevoked")
-        .withArgs(testData.touristId, owner.address);
-      
-      // Check status
-      const result = await touristID.verifyTouristID(testData.touristId);
-      expect(result[6]).to.equal(1); // status (REVOKED = 1)
+      const receipt = await tx.wait();
+      const event = receipt.logs.find(log => log.fragment?.name === 'TouristIdIssued');
+      touristId = event.args.touristId;
     });
 
-    it("Should expire a tourist ID when time has passed", async function () {
-      const { touristID, owner } = await loadFixture(deployTouristIDFixture);
-      
-      // Create data with short validity period
-      const validFrom = Math.floor(Date.now() / 1000) - 3600; // 1 hour ago
-      const validTo = Math.floor(Date.now() / 1000) + 10; // 10 seconds from now
-      const testData = {
-        ...createTestTouristData(),
-        validFrom,
-        validTo
-      };
-      
-      // Issue tourist ID
-      await touristID.connect(owner).issueTouristID(
-        testData.touristId,
-        testData.kycHash,
-        owner.address,
-        testData.validFrom,
-        testData.validTo,
-        testData.emergencyContact,
-        testData.tripItinerary
+    it("Should verify correct hashes", async function () {
+      const isValid = await touristID.verifyTouristHashes(
+        touristId,
+        kycHash,
+        itineraryHash,
+        emergencyHash
       );
-      
-      // Fast forward time past expiry
-      await time.increaseTo(validTo + 1);
-      
-      // Expire it
-      await expect(
-        touristID.expireTouristID(testData.touristId)
-      ).to.emit(touristID, "TouristIDExpired")
-        .withArgs(testData.touristId);
-      
-      // Check status
-      const result = await touristID.verifyTouristID(testData.touristId);
-      expect(result[6]).to.equal(2); // status (EXPIRED = 2)
+      expect(isValid).to.be.true;
     });
 
-    it("Should not revoke non-active tourist ID", async function () {
-      const { touristID, owner } = await loadFixture(deployTouristIDFixture);
-      const testData = createTestTouristData();
+    it("Should reject incorrect hashes", async function () {
+      const wrongHash = ethers.keccak256(ethers.toUtf8Bytes("wrong-data"));
       
-      // Issue and revoke
-      await touristID.connect(owner).issueTouristID(
-        testData.touristId,
-        testData.kycHash,
-        owner.address,
-        testData.validFrom,
-        testData.validTo,
-        testData.emergencyContact,
-        testData.tripItinerary
+      const isValid = await touristID.verifyTouristHashes(
+        touristId,
+        wrongHash,
+        itineraryHash,
+        emergencyHash
       );
-      
-      await touristID.connect(owner).revokeTouristID(testData.touristId);
-      
-      // Try to revoke again
-      await expect(
-        touristID.connect(owner).revokeTouristID(testData.touristId)
-      ).to.be.revertedWith("Tourist ID not active");
-    });
-
-    it("Should not expire tourist ID before expiry time", async function () {
-      const { touristID, owner } = await loadFixture(deployTouristIDFixture);
-      const testData = createTestTouristData();
-      
-      // Issue tourist ID (valid for 30 days)
-      await touristID.connect(owner).issueTouristID(
-        testData.touristId,
-        testData.kycHash,
-        owner.address,
-        testData.validFrom,
-        testData.validTo,
-        testData.emergencyContact,
-        testData.tripItinerary
-      );
-      
-      // Try to expire before time
-      await expect(
-        touristID.expireTouristID(testData.touristId)
-      ).to.be.revertedWith("Tourist ID not yet expired");
+      expect(isValid).to.be.false;
     });
   });
 
-  describe("Tourist ID Validation", function () {
-    it("Should correctly validate active tourist ID within validity period", async function () {
-      const { touristID, owner } = await loadFixture(deployTouristIDFixture);
+  describe("Admin Management", function () {
+    it("Should change admin successfully", async function () {
+      await expect(touristID.changeAdmin(user1.address))
+        .to.emit(touristID, "AdminChanged")
+        .withArgs(admin.address, user1.address);
       
-      // Create data with current time validity
-      const validFrom = Math.floor(Date.now() / 1000) - 3600; // 1 hour ago
-      const validTo = Math.floor(Date.now() / 1000) + 3600; // 1 hour from now
-      const testData = {
-        ...createTestTouristData(),
-        validFrom,
-        validTo
-      };
-      
-      // Issue tourist ID
-      await touristID.connect(owner).issueTouristID(
-        testData.touristId,
-        testData.kycHash,
-        owner.address,
-        testData.validFrom,
-        testData.validTo,
-        testData.emergencyContact,
-        testData.tripItinerary
-      );
-      
-      // Should be valid
-      expect(await touristID.isValidTouristID(testData.touristId)).to.be.true;
+      expect(await touristID.admin()).to.equal(user1.address);
     });
 
-    it("Should invalidate revoked tourist ID", async function () {
-      const { touristID, owner } = await loadFixture(deployTouristIDFixture);
-      const testData = createTestTouristData();
-      
-      // Issue and revoke
-      await touristID.connect(owner).issueTouristID(
-        testData.touristId,
-        testData.kycHash,
-        owner.address,
-        testData.validFrom,
-        testData.validTo,
-        testData.emergencyContact,
-        testData.tripItinerary
-      );
-      
-      await touristID.connect(owner).revokeTouristID(testData.touristId);
-      
-      // Should be invalid
-      expect(await touristID.isValidTouristID(testData.touristId)).to.be.false;
+    it("Should only allow current admin to change admin", async function () {
+      await expect(
+        touristID.connect(user1).changeAdmin(user2.address)
+      ).to.be.revertedWith("Only admin can perform this action");
+    });
+
+    it("Should not allow setting admin to zero address", async function () {
+      await expect(
+        touristID.changeAdmin(ethers.ZeroAddress)
+      ).to.be.revertedWith("Invalid admin address");
     });
   });
 
-  describe("KYC Hash Generation", function () {
-    it("Should generate consistent KYC hash", async function () {
-      const { touristID } = await loadFixture(deployTouristIDFixture);
+  describe("Get Tourist Information", function () {
+    let touristId;
+    
+    beforeEach(async function () {
+      const currentTime = await time.latest();
+      const startDate = currentTime + 3600;
+      const endDate = startDate + 86400;
       
-      const kycData = "TEST_AADHAAR_123456789";
-      const validFrom = 1700000000;
-      const validTo = 1700086400;
-      
-      const hash1 = await touristID.generateKYCHash(kycData, validFrom, validTo);
-      const hash2 = await touristID.generateKYCHash(kycData, validFrom, validTo);
-      
-      expect(hash1).to.equal(hash2);
-    });
-
-    it("Should generate different hashes for different data", async function () {
-      const { touristID } = await loadFixture(deployTouristIDFixture);
-      
-      const validFrom = 1700000000;
-      const validTo = 1700086400;
-      
-      const hash1 = await touristID.generateKYCHash("DATA1", validFrom, validTo);
-      const hash2 = await touristID.generateKYCHash("DATA2", validFrom, validTo);
-      
-      expect(hash1).to.not.equal(hash2);
-    });
-  });
-
-  describe("Edge Cases and Security", function () {
-    it("Should handle multiple tourist IDs from same issuer", async function () {
-      const { touristID, owner } = await loadFixture(deployTouristIDFixture);
-      
-      const testData1 = createTestTouristData(11111);
-      const testData2 = createTestTouristData(22222);
-      
-      // Issue multiple IDs
-      await touristID.connect(owner).issueTouristID(
-        testData1.touristId,
-        testData1.kycHash,
-        owner.address,
-        testData1.validFrom,
-        testData1.validTo,
-        testData1.emergencyContact,
-        testData1.tripItinerary
+      const tx = await touristID.issueTouristId(
+        kycHash,
+        itineraryHash,
+        emergencyHash,
+        startDate,
+        endDate
       );
       
-      await touristID.connect(owner).issueTouristID(
-        testData2.touristId,
-        testData2.kycHash,
-        owner.address,
-        testData2.validFrom,
-        testData2.validTo,
-        testData2.emergencyContact,
-        testData2.tripItinerary
-      );
-      
-      // Both should exist
-      expect(await touristID.touristExists(testData1.touristId)).to.be.true;
-      expect(await touristID.touristExists(testData2.touristId)).to.be.true;
+      const receipt = await tx.wait();
+      const event = receipt.logs.find(log => log.fragment?.name === 'TouristIdIssued');
+      touristId = event.args.touristId;
     });
 
-    it("Should handle maximum uint32 tourist ID", async function () {
-      const { touristID, owner } = await loadFixture(deployTouristIDFixture);
+    it("Should get tourist information", async function () {
+      const tourist = await touristID.getTouristInfo(touristId);
       
-      const maxUint32 = 4294967295; // 2^32 - 1
-      const testData = createTestTouristData(maxUint32);
-      
-      await expect(
-        touristID.connect(owner).issueTouristID(
-          testData.touristId,
-          testData.kycHash,
-          owner.address,
-          testData.validFrom,
-          testData.validTo,
-          testData.emergencyContact,
-          testData.tripItinerary
-        )
-      ).to.not.be.reverted;
-      
-      expect(await touristID.touristExists(maxUint32)).to.be.true;
+      expect(tourist.touristId).to.equal(touristId);
+      expect(tourist.kycHash).to.equal(kycHash);
+      expect(tourist.itineraryHash).to.equal(itineraryHash);
+      expect(tourist.emergencyHash).to.equal(emergencyHash);
+      expect(tourist.active).to.be.true;
     });
 
-    it("Should prevent unauthorized access to management functions", async function () {
-      const { touristID, unauthorized } = await loadFixture(deployTouristIDFixture);
-      const testData = createTestTouristData();
-      
-      // Try unauthorized operations
-      await expect(
-        touristID.connect(unauthorized).authorizeIssuer(unauthorized.address)
-      ).to.be.revertedWith("Ownable: caller is not the owner");
+    it("Should revert for non-existent tourist ID", async function () {
+      const fakeTouristId = ethers.keccak256(ethers.toUtf8Bytes("fake-id"));
       
       await expect(
-        touristID.connect(unauthorized).revokeIssuer(unauthorized.address)
-      ).to.be.revertedWith("Ownable: caller is not the owner");
-    });
-
-    it("Should handle reentrancy protection", async function () {
-      const { touristID, owner } = await loadFixture(deployTouristIDFixture);
-      const testData = createTestTouristData();
-      
-      // This test ensures the ReentrancyGuard is working
-      // In a real scenario, you'd test with a malicious contract
-      // For now, we just verify the modifier doesn't break normal operation
-      await expect(
-        touristID.connect(owner).issueTouristID(
-          testData.touristId,
-          testData.kycHash,
-          owner.address,
-          testData.validFrom,
-          testData.validTo,
-          testData.emergencyContact,
-          testData.tripItinerary
-        )
-      ).to.not.be.reverted;
-    });
-  });
-
-  describe("Gas Optimization Tests", function () {
-    it("Should have reasonable gas costs for common operations", async function () {
-      const { touristID, owner } = await loadFixture(deployTouristIDFixture);
-      const testData = createTestTouristData();
-      
-      // Test issuance gas cost
-      const issueTx = await touristID.connect(owner).issueTouristID(
-        testData.touristId,
-        testData.kycHash,
-        owner.address,
-        testData.validFrom,
-        testData.validTo,
-        testData.emergencyContact,
-        testData.tripItinerary
-      );
-      
-      const receipt = await issueTx.wait();
-      console.log("      Gas used for issuance:", receipt.gasUsed.toString());
-      
-      // Verify gas usage is reasonable (adjust threshold as needed)
-      expect(receipt.gasUsed).to.be.below(220000); // Updated to realistic threshold
+        touristID.getTouristInfo(fakeTouristId)
+      ).to.be.revertedWith("Tourist ID does not exist");
     });
   });
 });

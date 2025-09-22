@@ -1,265 +1,238 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-
 /**
  * @title TouristID
- * @dev Manages secure digital IDs for tourists in the Triana project
- * @author Triana Development Team
+ * @dev Smart contract for managing tourist identities with QR code generation
+ * @author Triana Team
  */
-contract TouristID is Ownable, ReentrancyGuard {
+contract TouristID {
     
-    // Tourist status enumeration
-    enum Status {
-        ACTIVE,
-        REVOKED,
-        EXPIRED
-    }
-    
-    // Tourist struct definition
+    // Struct definition as per team lead's specification
     struct Tourist {
-        bytes32 kycHash;           // Hash of KYC data (Aadhaar/passport + validity period)
-        address issuerId;          // Address of entry point (hotel/airport)
-        uint64 validFrom;          // UNIX timestamp - validity start
-        uint64 validTo;            // UNIX timestamp - validity end
-        string emergencyContact;   // Emergency contact information
-        string tripItinerary;      // Trip itinerary details
-        Status status;             // Current status of the tourist ID
+        bytes32 touristId; // keccak256 hash of KYC + Itinerary + Emergency
+        bytes32 kycHash; // Incoming hash from server
+        bytes32 itineraryHash; // Incoming hash from server
+        bytes32 emergencyHash; // Incoming hash from server
+        uint256 startDate; // Visit start timestamp
+        uint256 endDate; // Visit end timestamp
+        bool active; // Is tourist currently active
     }
-    
-    // Main mapping: touristId => Tourist data
-    mapping(uint32 => Tourist) public tourists;
-    
-    // Track existing tourist IDs to prevent duplicates
-    mapping(uint32 => bool) public touristExists;
-    
-    // Authorized issuers (hotels, airports, etc.)
-    mapping(address => bool) public authorizedIssuers;
+
+    // State variables
+    address public admin;
+    mapping(bytes32 => Tourist) public tourists; // touristId -> Tourist
+    mapping(bytes32 => string) public touristQRCodes; // touristId -> QR code data
     
     // Events
-    event TouristIDIssued(
-        uint32 indexed touristId,
-        address indexed issuerId,
-        uint64 validFrom,
-        uint64 validTo
-    );
-    
-    event TouristIDRevoked(uint32 indexed touristId, address indexed revokedBy);
-    event TouristIDExpired(uint32 indexed touristId);
-    event IssuerAuthorized(address indexed issuer);
-    event IssuerRevoked(address indexed issuer);
+    event TouristIdIssued(bytes32 indexed touristId, address indexed issuer, string qrCode);
+    event TouristIdRevoked(bytes32 indexed touristId, address indexed revoker);
+    event AdminChanged(address indexed oldAdmin, address indexed newAdmin);
     
     // Modifiers
-    modifier onlyAuthorizedIssuer() {
-        require(authorizedIssuers[msg.sender] || msg.sender == owner(), "Not authorized issuer");
+    modifier onlyAdmin() {
+        require(msg.sender == admin, "Only admin can perform this action");
         _;
     }
     
-    modifier touristIdExists(uint32 _touristId) {
-        require(touristExists[_touristId], "Tourist ID does not exist");
+    modifier validTouristId(bytes32 _touristId) {
+        require(tourists[_touristId].touristId != 0, "Tourist ID does not exist");
         _;
     }
     
-    modifier validTimeRange(uint64 _validFrom, uint64 _validTo) {
-        require(_validFrom < _validTo, "Invalid time range");
-        // Allow more flexibility for testing - 24 hours buffer
-        require(_validFrom >= block.timestamp - 86400, "Start time too far in past"); 
+    modifier validDateRange(uint256 _startDate, uint256 _endDate) {
+        require(_startDate < _endDate, "Invalid date range");
+        require(_startDate >= block.timestamp - 3600, "Start date cannot be too far in past");
         _;
     }
     
+    // Constructor
     constructor() {
-        // Contract deployer is automatically authorized
-        authorizedIssuers[msg.sender] = true;
-        emit IssuerAuthorized(msg.sender);
+        admin = msg.sender;
+        emit AdminChanged(address(0), admin);
     }
     
     /**
-     * @dev Issue a new tourist ID
-     * @param _touristId Unique tourist identifier
-     * @param _kycHash Hash of KYC data (Aadhaar/passport + validity period)
-     * @param _issuerId Address of the issuing entity
-     * @param _validFrom Validity start timestamp
-     * @param _validTo Validity end timestamp
-     * @param _emergencyContact Emergency contact information
-     * @param _tripItinerary Trip itinerary details
+     * @dev Issues a new tourist ID after verifying the provided hashes and dates
+     * @param _kycHash Hash of KYC data
+     * @param _itineraryHash Hash of itinerary data
+     * @param _emergencyHash Hash of emergency contact data
+     * @param _startDate Visit start timestamp
+     * @param _endDate Visit end timestamp
+     * @return touristId The generated tourist ID
      */
-    function issueTouristID(
-        uint32 _touristId,
+    function issueTouristId(
         bytes32 _kycHash,
-        address _issuerId,
-        uint64 _validFrom,
-        uint64 _validTo,
-        string calldata _emergencyContact,
-        string calldata _tripItinerary
-    ) 
-        external 
-        onlyAuthorizedIssuer 
-        validTimeRange(_validFrom, _validTo)
-        nonReentrant 
-    {
-        require(!touristExists[_touristId], "Tourist ID already exists");
-        require(_kycHash != bytes32(0), "KYC hash cannot be empty");
-        require(_issuerId != address(0), "Invalid issuer address");
-        require(bytes(_emergencyContact).length > 0, "Emergency contact required");
+        bytes32 _itineraryHash,
+        bytes32 _emergencyHash,
+        uint256 _startDate,
+        uint256 _endDate
+    ) public onlyAdmin validDateRange(_startDate, _endDate) returns (bytes32) {
         
-        // Create new tourist record
-        tourists[_touristId] = Tourist({
+        // Generate unique tourist ID
+        bytes32 touristId = keccak256(abi.encodePacked(
+            _kycHash,
+            _itineraryHash,
+            _emergencyHash,
+            block.timestamp
+        ));
+        
+        require(tourists[touristId].touristId == 0, "Tourist ID already exists");
+        
+        // Create tourist record
+        tourists[touristId] = Tourist({
+            touristId: touristId,
             kycHash: _kycHash,
-            issuerId: _issuerId,
-            validFrom: _validFrom,
-            validTo: _validTo,
-            emergencyContact: _emergencyContact,
-            tripItinerary: _tripItinerary,
-            status: Status.ACTIVE
+            itineraryHash: _itineraryHash,
+            emergencyHash: _emergencyHash,
+            startDate: _startDate,
+            endDate: _endDate,
+            active: true
         });
         
-        touristExists[_touristId] = true;
+        // Generate QR code data (JSON-like string for easy parsing)
+        string memory qrCode = generateQRCode(touristId, _startDate, _endDate);
+        touristQRCodes[touristId] = qrCode;
         
-        emit TouristIDIssued(_touristId, _issuerId, _validFrom, _validTo);
+        emit TouristIdIssued(touristId, msg.sender, qrCode);
+        return touristId;
     }
     
     /**
-     * @dev Verify a tourist ID and return all details
-     * @param _touristId Tourist ID to verify
-     * @return kycHash The KYC hash of the tourist
-     * @return issuerId The address of the issuer
-     * @return validFrom The validity start timestamp
-     * @return validTo The validity end timestamp
-     * @return emergencyContact The emergency contact information
-     * @return tripItinerary The trip itinerary
-     * @return status The current status of the tourist ID
+     * @dev Verifies the existence and validity of a tourist ID
+     * @param _touristId The tourist ID to verify
+     * @return isValid Whether the tourist ID is valid
      */
-    function verifyTouristID(uint32 _touristId) 
-        external 
-        view 
-        touristIdExists(_touristId)
-        returns (
-            bytes32 kycHash,
-            address issuerId,
-            uint64 validFrom,
-            uint64 validTo,
-            string memory emergencyContact,
-            string memory tripItinerary,
-            Status status
-        ) 
-    {
+    function verifyTouristId(bytes32 _touristId) public view returns (bool) {
         Tourist memory tourist = tourists[_touristId];
-        
-        return (
-            tourist.kycHash,
-            tourist.issuerId,
-            tourist.validFrom,
-            tourist.validTo,
-            tourist.emergencyContact,
-            tourist.tripItinerary,
-            tourist.status
-        );
+        if (tourist.touristId == 0) {
+            return false; // ID does not exist
+        }
+        if (!tourist.active) {
+            return false; // ID is revoked
+        }
+        if (block.timestamp < tourist.startDate || block.timestamp > tourist.endDate) {
+            return false; // ID is not currently valid
+        }
+        return true; // ID is valid
     }
     
     /**
-     * @dev Revoke a tourist ID
-     * @param _touristId Tourist ID to revoke
+     * @dev Revokes an existing tourist ID
+     * @param _touristId The tourist ID to revoke
      */
-    function revokeTouristID(uint32 _touristId) 
-        external 
-        onlyAuthorizedIssuer 
-        touristIdExists(_touristId) 
-    {
-        require(tourists[_touristId].status == Status.ACTIVE, "Tourist ID not active");
-        
-        tourists[_touristId].status = Status.REVOKED;
-        
-        emit TouristIDRevoked(_touristId, msg.sender);
-    }
-    
-    /**
-     * @dev Mark a tourist ID as expired
-     * @param _touristId Tourist ID to expire
-     */
-    function expireTouristID(uint32 _touristId) 
-        external 
-        touristIdExists(_touristId) 
-    {
+    function revokeTouristId(bytes32 _touristId) public onlyAdmin validTouristId(_touristId) {
         Tourist storage tourist = tourists[_touristId];
-        require(block.timestamp >= tourist.validTo, "Tourist ID not yet expired");
-        require(tourist.status == Status.ACTIVE, "Tourist ID not active");
+        require(tourist.active, "Tourist ID is already revoked");
         
-        tourist.status = Status.EXPIRED;
-        
-        emit TouristIDExpired(_touristId);
+        tourist.active = false;
+        emit TouristIdRevoked(_touristId, msg.sender);
     }
     
     /**
-     * @dev Check if a tourist ID is currently valid
-     * @param _touristId Tourist ID to check
-     * @return isValid True if ID is valid and active
+     * @dev Verifies the integrity of the hashes associated with a tourist ID
+     * @param _touristId The tourist ID to verify
+     * @param _kycHash Expected KYC hash
+     * @param _itineraryHash Expected itinerary hash
+     * @param _emergencyHash Expected emergency hash
+     * @return isValid Whether all hashes match
      */
-    function isValidTouristID(uint32 _touristId) 
-        external 
-        view 
-        touristIdExists(_touristId)
-        returns (bool isValid) 
-    {
+    function verifyTouristHashes(
+        bytes32 _touristId,
+        bytes32 _kycHash,
+        bytes32 _itineraryHash,
+        bytes32 _emergencyHash
+    ) public view validTouristId(_touristId) returns (bool) {
         Tourist memory tourist = tourists[_touristId];
-        
         return (
-            tourist.status == Status.ACTIVE &&
-            block.timestamp >= tourist.validFrom &&
-            block.timestamp <= tourist.validTo
+            tourist.kycHash == _kycHash &&
+            tourist.itineraryHash == _itineraryHash &&
+            tourist.emergencyHash == _emergencyHash
         );
     }
     
     /**
-     * @dev Generate KYC hash from components
-     * @param _kycData Concatenated KYC data
-     * @param _validFrom Validity start timestamp
-     * @param _validTo Validity end timestamp
-     * @return kycHash The computed hash
+     * @dev Generates QR code data for a tourist ID
+     * @param _touristId The tourist ID
+     * @param _startDate Visit start date
+     * @param _endDate Visit end date
+     * @return qrCode QR code data string
      */
-    function generateKYCHash(
-        string calldata _kycData,
-        uint64 _validFrom,
-        uint64 _validTo
-    ) 
-        external 
-        pure 
-        returns (bytes32 kycHash) 
-    {
-        return keccak256(abi.encodePacked(_kycData, _validFrom, _validTo));
+    function generateQRCode(
+        bytes32 _touristId,
+        uint256 _startDate,
+        uint256 _endDate
+    ) internal pure returns (string memory) {
+        return string(abi.encodePacked(
+            '{"id":"0x',
+            toHexString(_touristId),
+            '","start":',
+            uint2str(_startDate),
+            ',"end":',
+            uint2str(_endDate),
+            ',"type":"tourist"}'
+        ));
     }
     
     /**
-     * @dev Authorize a new issuer
-     * @param _issuer Address to authorize
+     * @dev Gets the QR code for a tourist ID
+     * @param _touristId The tourist ID
+     * @return qrCode The QR code data
      */
-    function authorizeIssuer(address _issuer) external onlyOwner {
-        require(_issuer != address(0), "Invalid issuer address");
-        require(!authorizedIssuers[_issuer], "Already authorized");
-        
-        authorizedIssuers[_issuer] = true;
-        emit IssuerAuthorized(_issuer);
+    function getTouristQRCode(bytes32 _touristId) public view validTouristId(_touristId) returns (string memory) {
+        return touristQRCodes[_touristId];
     }
     
     /**
-     * @dev Revoke issuer authorization
-     * @param _issuer Address to revoke
+     * @dev Gets tourist information
+     * @param _touristId The tourist ID
+     * @return tourist The tourist struct
      */
-    function revokeIssuer(address _issuer) external onlyOwner {
-        require(authorizedIssuers[_issuer], "Not authorized");
-        
-        authorizedIssuers[_issuer] = false;
-        emit IssuerRevoked(_issuer);
+    function getTouristInfo(bytes32 _touristId) public view validTouristId(_touristId) returns (Tourist memory) {
+        return tourists[_touristId];
     }
     
     /**
-     * @dev Get total number of issued tourist IDs (for statistics)
-     * Note: This is a simple counter, for production consider using a counter variable
+     * @dev Changes the admin address
+     * @param _newAdmin The new admin address
      */
-    function getTouristCount() external view returns (uint256 count) {
-        // This is a basic implementation - for production, maintain a counter
-        // to avoid gas costs of iteration
-        return 0; // Placeholder - implement counter in production
+    function changeAdmin(address _newAdmin) public onlyAdmin {
+        require(_newAdmin != address(0), "Invalid admin address");
+        address oldAdmin = admin;
+        admin = _newAdmin;
+        emit AdminChanged(oldAdmin, _newAdmin);
+    }
+    
+    // Utility functions for QR code generation
+    function toHexString(bytes32 _bytes) internal pure returns (string memory) {
+        bytes memory hexAlphabet = "0123456789abcdef";
+        bytes memory str = new bytes(64);
+        for (uint256 i = 0; i < 32; i++) {
+            str[i * 2] = hexAlphabet[uint8(_bytes[i] >> 4)];
+            str[1 + i * 2] = hexAlphabet[uint8(_bytes[i] & 0x0f)];
+        }
+        return string(str);
+    }
+    
+    function uint2str(uint256 _i) internal pure returns (string memory) {
+        if (_i == 0) {
+            return "0";
+        }
+        uint256 j = _i;
+        uint256 len;
+        while (j != 0) {
+            len++;
+            j /= 10;
+        }
+        bytes memory bstr = new bytes(len);
+        uint256 k = len;
+        while (_i != 0) {
+            k = k - 1;
+            uint8 temp = (48 + uint8(_i - _i / 10 * 10));
+            bytes1 b1 = bytes1(temp);
+            bstr[k] = b1;
+            _i /= 10;
+        }
+        return string(bstr);
     }
 }
